@@ -218,7 +218,8 @@ class Server(BaseComponent):
 		self.fire(reply(sock, RPL_YOURHOST(self.host, self.version)))
 		self.fire(reply(sock, ERR_NOMOTD()))
 
-		#self.fire(response.create("join", sock, source, "#circuits"))
+	def force_join(self, sock, source, channel):
+		self.fire(response.create("join", sock, source, channel))
 
 	@handler('join')
 	def join(self, sock, source, name):
@@ -244,6 +245,14 @@ class Server(BaseComponent):
 		self.fire(reply(sock, RPL_NAMEREPLY(channel)))
 		self.fire(reply(sock, RPL_ENDOFNAMES()))
 
+	@handler('join', priority=2):
+	def on_join(self, event, sock, source, name):
+		user = self.users[sock]
+		if not user.rc:
+			return
+		event.stop()
+		user.rc.on_join(source, name)
+
 	@handler('part')
 	def part(self, sock, source, name, reason="Leaving"):
 		user = self.users[sock]
@@ -261,6 +270,14 @@ class Server(BaseComponent):
 		if not channel.users:
 			del self.channels[name]
 
+	@handler('part', priority=2):
+	def on_join(self, event, sock, source, name, reason='Leaving'):
+		user = self.users[sock]
+		if not user.rc:
+			return
+		event.stop()
+		user.rc.on_part(source, name, reason)
+
 	@handler('privmsg')
 	def privmsg(self, sock, source, target, message):
 		user = self.users[sock]
@@ -277,9 +294,6 @@ class Server(BaseComponent):
 				user
 			)
 		else:
-			if target.lower() == 'nickserv':
-				self.handle_nickserv(sock, source, target, message)
-				return
 			if target not in self.nicks:
 				return self.fire(reply(sock, ERR_NOSUCHNICK(target)))
 
@@ -290,7 +304,19 @@ class Server(BaseComponent):
 				)
 			)
 
-	def handle_nickserv(self, sock, source, target, message):
+	@handler('privmsg', priority=1.5)
+	def _on_privmsg_rc(self, event, sock, source, target, message):
+		user = self.users[sock]
+		if not user.rc:
+			return
+		event.stop()
+		user.rc.on_privmsg(target, message)
+
+	@handler('privmsg', priority=2)
+	def _on_login(self, event, sock, source, target, message):
+		if target.lower() != 'nickserv':
+			return
+		event.stop()
 		if not message.startswith('identify '):
 			return
 		_, username, password = message.split()
@@ -336,6 +362,17 @@ class Server(BaseComponent):
 			message.prefix = self.host
 
 		self.fire(write(target, bytes(message)))
+
+	@handler('list')
+	def list(self, sock):
+		user = self.users[sock]
+		if not user.rc:
+			return
+		channel_list = user.rc.get_channels()
+		self.fire(reply(sock, _M(u"321", "Channel Users Name")))
+		for channel in channel_list:
+			self.fire(reply(sock, RPL_LIST(channel['name'], channel['usersCount'], channel.get('topic', ''))))
+		self.fire(reply(sock, RPL_LISTEND()))
 
 	@property
 	def commands(self):

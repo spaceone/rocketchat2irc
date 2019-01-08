@@ -17,10 +17,11 @@ class RocketChatError(Exception):
 
 class RocketChatClient(WebSocketClient):
 
-	def __init__(self, uri, username, password):
+	def __init__(self, uri, username, password, user=None):
 		channel = 'irc-rc-%s' % (username,)
 		self.username = username
 		self.password = password
+		self.user = user
 		super(RocketChatClient, self).__init__(uri, channel=channel, wschannel='ws-%s' % (channel,))
 
 	def init(self, *args, **kwargs):
@@ -51,6 +52,7 @@ class RocketChatClient(WebSocketClient):
 		if self.logged_in == 2 and 'id' in data.get('result', {}):
 			self.logged_in = True
 			self.user_id = data['result']['id']
+			self.on_logged_in()
 
 		if data.get('msg') == 'ping':
 			response = {'msg': 'pong'}
@@ -59,8 +61,15 @@ class RocketChatClient(WebSocketClient):
 		elif 'id' in data:
 			self.stack[data['id']] = data
 
+		response = self.handle_message(data)
+
 		if response is not None:
 			self.writej(response)
+
+	def on_logged_in(self):
+		channels = self.rc.get_joined_channels()
+		for channel in channels:
+			self.irc.force_join(sock, source, '#%s' % (channel['name'],))
 
 	def _rc_connect_query(self):
 		return {
@@ -228,6 +237,93 @@ class RocketChatClient(WebSocketClient):
 				reason=result['error']['reason']
 			)
 		yield result
+
+	def handle_message(self, data):
+		if data["collection"] == "stream-room-messages":
+			msg = data["fields"]["args"][0]
+			if msg.get('t') == "uj":
+				self.send_join(msg)
+			elif msg.get('t') == "ul":
+				self.send_part(msg)
+			elif msg.get("attachments"):
+				self.send_file_link(msg)
+			else:
+				self.send_irc_message(msg)
+
+		if data["collection"] == "stream-notify-user":
+			msg = data["fields"]["args"][0]["payload"]
+			if "type" in msg and msg["type"] == "d":
+				self.send_private_message(data["fields"]["args"][0]["payload"])
+
+	def send_irc_message(self, msg):
+		if msg["u"]["_id"] == self.user_id:
+			return
+		channel_name = self.get_channel_name(msg["rid"])
+		for line in msg["msg"].splitlines():
+			self.irc.privmsg(msg["u"]["username"], None, '#%s' % (channel_name,), line)
+
+	def send_file_link(self, msg):
+		if msg["u"]["_id"] == self.user_id:
+			return
+		if "title_link" not in msg["attachments"][0]:
+			self.send_irc_message(msg)
+			return
+		channel_name = self.get_channel_name(msg["rid"])
+		lines = "{description}: https:{rc_server}{link}".format(
+			description=msg["attachments"][0].get("description", ""),
+			rc_server=self.server.split(":", 1)[-1],  # FIXME
+			link=msg["attachments"][0]["title_link"]
+		)
+		for line in lines.splitlines():
+			self.irc.privmsg(msg["u"]["username"], None, '#%s' % (channel_name,), line)
+
+	def send_join(self, msg):
+		channel_name = self.get_channel_name(msg["rid"])
+		self.irc.force_join(self.sock, self.get_source(msg["u"]["username"]), '#%s' % (channel_name,))
+
+	def get_source(self, username):
+		return [username, '%s!%s@%s' % (username, username, 'localhost')]
+
+	def send_part(self, msg):
+		channel_name = self.get_channel_name(msg["rid"])
+		self.irc.force_part(self.sock, self.get_source(msg["u"]["username"]), '#%s' % (channel_name,))
+
+	def send_private_message(self, msg):
+		for line in msg["message"]["msg"].split("\n"):
+			self.irc.privmsg(self.sock, self.get_source(msg["sender"]["username"]), self.user.nick, line)
+
+	def on_privmsg(self, target, msg):
+		if target.startswith("#"):
+			channel_info = self.get_channel_info(
+				target.replace("#", "", 1)
+			)
+			rid = channel_info["_id"]
+		else:
+			rid = self.get_private_room_id(target)["rid"]
+
+		self.send_irc_message(rid, msg)
+
+	def on_join(self, source, name):
+		channel_info = self.get_channel_info(
+			name.replace("#", "", 1)
+		)
+		channel_members = self.get_users_of_room(
+			channel_info["_id"]
+		)
+		self.join_room(channel_info["_id"])
+		self.sub_to_room_messages(channel_info["_id"])
+		users = " ".join([
+			member["username"] for member in channel_members["records"]
+		])
+		self.irc.join(self.user.sock, source, name)
+
+	def on_part(self, source, name, reason):
+		channel_info = self.get_channel_info(
+			name.replace("#", "", 1)
+		)
+		self.unsub_to_room_messages(channel_info["_id"])
+		self.leave_room(channel_info["_id"])
+		self.irc.part(self.user.sock, source, name, reason)
 
 	@handler("read", channel="stdin")
 	def stdin_read(self, data):

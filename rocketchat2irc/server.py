@@ -6,6 +6,7 @@ from itertools import chain
 from operator import attrgetter
 from time import time
 from logging import getLogger
+from urlparse import urlparse
 
 from circuits import BaseComponent, handler, Debugger
 from circuits.net.events import close, write
@@ -16,6 +17,8 @@ from circuits.protocols.irc.replies import (
 	ERR_UNKNOWNCOMMAND, RPL_ENDOFNAMES, RPL_ENDOFWHO, RPL_NAMEREPLY,
 	RPL_NOTOPIC, RPL_WELCOME, RPL_WHOREPLY, RPL_YOURHOST,
 )
+
+from rocketchat2irc.rocketchat import RocketChatClient
 
 __version__ = "0.0.1"
 
@@ -41,6 +44,7 @@ class User(object):
 		self.signon = None
 		self.registered = False
 		self.userinfo = UserInfo()
+		self.rc = None
 
 	@property
 	def prefix(self):
@@ -149,7 +153,7 @@ class Server(BaseComponent):
 		user, host = user.userinfo.user, user.userinfo.host
 
 		yield self.call(
-			response.create("quit", sock, (nick, user, host), "Leavling")
+			response.create("quit", sock, (nick, user, host), "Leaving")
 		)
 
 		del self.users[sock]
@@ -273,6 +277,9 @@ class Server(BaseComponent):
 				user
 			)
 		else:
+			if target.lower() == 'nickserv':
+				self.handle_nickserv(sock, source, target, message)
+				return
 			if target not in self.nicks:
 				return self.fire(reply(sock, ERR_NOSUCHNICK(target)))
 
@@ -282,6 +289,16 @@ class Server(BaseComponent):
 					Message("PRIVMSG", target, message, prefix=user.prefix)
 				)
 			)
+
+	def handle_nickserv(self, sock, source, target, message):
+		if not message.startswith('identify '):
+			return
+		_, username, password = message.split()
+		url = urlparse(username)
+		username = url.username
+		user = self.users[sock]
+		user.rc = RocketChatClient(url, username, password)
+		self += user.rc
 
 	@handler('who')
 	def who(self, sock, source, mask):

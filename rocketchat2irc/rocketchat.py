@@ -30,9 +30,9 @@ class RocketChatClient(WebSocketClient):
 		self.stack = {}
 
 	def writej(self, data):
-		return self.fire(write(json.dumps(data)), self.wschannel)
+		return self.fire(write(json.dumps(data)), self._wschannel)
 
-	@handler('read')
+	@handler('read', channel='*')
 	def _on_receive(self, event, data):
 		if self._wschannel not in event.channels:
 			return
@@ -45,20 +45,7 @@ class RocketChatClient(WebSocketClient):
 		if not isinstance(data, dict):
 			return
 
-		if not self.logged_in:
-			self.logged_in = 2
-			self.writej(self._rc_connect_query())
-			self.writej(self._rc_login_query())
-		if self.logged_in == 2 and 'id' in data.get('result', {}):
-			self.logged_in = True
-			self.user_id = data['result']['id']
-			self.on_logged_in()
-
-		if data.get('msg') == 'ping':
-			response = {'msg': 'pong'}
-		#elif response.get('msg') == 'changed':
-		#	pass
-		elif 'id' in data:
+		if 'id' in data:
 			self.stack[data['id']] = data
 
 		response = self.handle_message(data)
@@ -66,10 +53,46 @@ class RocketChatClient(WebSocketClient):
 		if response is not None:
 			self.writej(response)
 
+	def handle_message(self, data):
+		if not self.logged_in and data.get('server_id'):
+			# {"server_id":"0"}
+			return self._rc_connect_query()
+		if not self.logged_in and data.get('msg') == 'connected':
+			# {"msg":"connected","session":"XXXXXX"}
+			return self._rc_login_query()
+		if not self.logged_in and data.get('msg') == 'result':
+			# {"msg":"added","collection":"users","id":"XXX","fields":{"username":"xxx","emails":[{"address":"x@x.de","verified":true}]}}
+			# {"msg":"result","id":"0","result":{"id":"XXX","token":"XXXX","tokenExpires":{"$date":1554807371206},"type":"password"}}
+			# {"msg":"updated","methods":["0"]}
+			self.logged_in = True
+			self.user_id = data['result']['id']
+			#self.on_logged_in()
+		if data.get('msg') == 'ping':
+			# u'{"msg":"ping"}'
+			return {'msg': 'pong'}
+		#if data.get('msg') == 'changed':
+		#	pass
+
+		if data["collection"] == "stream-room-messages":
+			msg = data["fields"]["args"][0]
+			if msg.get('t') == "uj":
+				self.send_join(msg)
+			elif msg.get('t') == "ul":
+				self.send_part(msg)
+			elif msg.get("attachments"):
+				self.send_file_link(msg)
+			else:
+				self.send_irc_message(msg)
+
+		if data["collection"] == "stream-notify-user":
+			msg = data["fields"]["args"][0]["payload"]
+			if "type" in msg and msg["type"] == "d":
+				self.send_private_message(data["fields"]["args"][0]["payload"])
+
 	def on_logged_in(self):
 		channels = self.rc.get_joined_channels()
 		for channel in channels:
-			self.irc.force_join(sock, source, '#%s' % (channel['name'],))
+			self.irc.force_join(self.user.sock, source, '#%s' % (channel['name'],))
 
 	def _rc_connect_query(self):
 		return {
@@ -238,23 +261,6 @@ class RocketChatClient(WebSocketClient):
 			)
 		yield result
 
-	def handle_message(self, data):
-		if data["collection"] == "stream-room-messages":
-			msg = data["fields"]["args"][0]
-			if msg.get('t') == "uj":
-				self.send_join(msg)
-			elif msg.get('t') == "ul":
-				self.send_part(msg)
-			elif msg.get("attachments"):
-				self.send_file_link(msg)
-			else:
-				self.send_irc_message(msg)
-
-		if data["collection"] == "stream-notify-user":
-			msg = data["fields"]["args"][0]["payload"]
-			if "type" in msg and msg["type"] == "d":
-				self.send_private_message(data["fields"]["args"][0]["payload"])
-
 	def send_irc_message(self, msg):
 		if msg["u"]["_id"] == self.user_id:
 			return
@@ -327,8 +333,9 @@ class RocketChatClient(WebSocketClient):
 
 	@handler("read", channel="stdin")
 	def stdin_read(self, data):
-		user, message = data.split(None, 1)
-		exec(message)
+		#user, message = data.split(None, 1)
+		message = data
+		exec(message.strip())
 
 
 if __name__ == '__main__':

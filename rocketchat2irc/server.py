@@ -16,6 +16,7 @@ from circuits.protocols.irc.replies import (
 	ERR_NICKNAMEINUSE, ERR_NOMOTD, ERR_NOSUCHCHANNEL, ERR_NOSUCHNICK,
 	ERR_UNKNOWNCOMMAND, RPL_ENDOFNAMES, RPL_ENDOFWHO, RPL_NAMEREPLY,
 	RPL_NOTOPIC, RPL_WELCOME, RPL_WHOREPLY, RPL_YOURHOST,
+	RPL_LIST, RPL_LISTEND, _M
 )
 
 from rocketchat2irc.rocketchat import RocketChatClient
@@ -245,7 +246,7 @@ class Server(BaseComponent):
 		self.fire(reply(sock, RPL_NAMEREPLY(channel)))
 		self.fire(reply(sock, RPL_ENDOFNAMES()))
 
-	@handler('join', priority=2):
+	@handler('join', priority=2)
 	def on_join(self, event, sock, source, name):
 		user = self.users[sock]
 		if not user.rc:
@@ -270,7 +271,7 @@ class Server(BaseComponent):
 		if not channel.users:
 			del self.channels[name]
 
-	@handler('part', priority=2):
+	@handler('part', priority=2)
 	def on_join(self, event, sock, source, name, reason='Leaving'):
 		user = self.users[sock]
 		if not user.rc:

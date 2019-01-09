@@ -10,7 +10,7 @@ from circuits.io import stdin
 from circuits.net.events import write
 from circuits.web.websockets import WebSocketClient
 
-from rocketchat2irc.server import Channel, User
+from rocketchat2irc.server import Channel, User, reply, ERR_NOSUCHNICK
 
 
 class RocketChatError(Exception):
@@ -311,6 +311,11 @@ class RocketChatClient(WebSocketClient):
 			return
 		yield result['result']
 
+	def rc_eval(self, thing):
+		if isinstance(thing, RocketChatError):
+			raise thing
+		return thing
+
 	@handler('send_irc_message')
 	def send_irc_message(self, msg):
 		if msg["u"]["_id"] == self.user_id:
@@ -370,12 +375,14 @@ class RocketChatClient(WebSocketClient):
 	@handler('privmsg')
 	def on_privmsg(self, target, msg):
 		if target.startswith("#"):
-			channel_info = (yield self.call(Event.create('get_channel_info', target.replace("#", "", 1)))).value
-			rid = channel_info["_id"]
+			rid = (yield self.call(Event.create('get_channel_info', target.replace("#", "", 1)))).value['_id']
 		else:
-			channel_info = (yield self.call(Event.create('get_private_room_id', target))).value
-			rid = channel_info["_id"]
-
+			result = (yield self.call(Event.create('get_private_room_id', target))).value
+			try:
+				rid = self.rc_eval(result)['rid']
+			except RocketChatError:
+				self.user.irc.fire(reply(self.user.sock, ERR_NOSUCHNICK(target)))
+				return
 		self.fire(Event.create('send_message', rid, msg))
 
 	@handler('join')

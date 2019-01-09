@@ -18,7 +18,7 @@ from circuits.protocols.irc.replies import (
 	ERR_NICKNAMEINUSE, ERR_NOMOTD, ERR_NOSUCHCHANNEL, ERR_NOSUCHNICK,
 	ERR_UNKNOWNCOMMAND, RPL_ENDOFNAMES, RPL_ENDOFWHO, RPL_NAMEREPLY,
 	RPL_NOTOPIC, RPL_TOPIC, RPL_WELCOME, RPL_WHOREPLY, RPL_YOURHOST,
-	RPL_LIST, RPL_LISTEND, _M
+	RPL_LIST, RPL_LISTEND, _M, RPL_CHANNELMODEIS
 )
 
 __version__ = "0.0.1"
@@ -363,6 +363,17 @@ class Server(BaseComponent):
 	def ping(self, event, sock, source, server):
 		event.stop()
 		self.fire(reply(sock, Message("PONG", server)))
+
+	@handler('mode')
+	def mode(self, sock, source, mask, mode=None, params=None):
+		if mask.startswith('#'):
+			if mask not in self.channels:
+				return self.fire(reply(sock, ERR_NOSUCHCHANNEL(mask)))
+			channel = self.channels[mask]
+			if not params:
+				self.fire(reply(sock, RPL_CHANNELMODEIS(channel.name, channel.mode)))
+		elif mask not in self.users:
+			return self.fire(reply(sock, ERR_NOSUCHNICK(mask)))
 
 	@handler('reply')
 	def reply(self, target, message):

@@ -29,6 +29,7 @@ class RocketChatClient(WebSocketClient):
 	def init(self, *args, **kwargs):
 		self.logged_in = False
 		self.stack = {}
+		self.__sub_room2id_cache = {}
 
 	def writej(self, data):
 		return self.fire(write(json.dumps(data)), self._wschannel)
@@ -126,6 +127,10 @@ class RocketChatClient(WebSocketClient):
 		for cnl in channels:
 			channel = Channel(cnl['name'])
 			channel.topic = cnl.get('topic')
+			channel_members = (yield self.call(Event.create('get_users_of_room', cnl["_id"]))).value
+			for member in channel_members["records"]:
+				user = self.get_fake_user(member['username'])
+				channel.users.append(user)
 			self.user.irc.channels[channel.name] = channel
 
 		channels = (yield self.call(Event.create('get_joined_channels'))).value
@@ -375,11 +380,15 @@ class RocketChatClient(WebSocketClient):
 
 	@handler('join')
 	def on_join(self, source, name):
+		if name in self.user.channels:
+			return
 		channel_info = (yield self.call(Event.create('get_channel_info', name.replace("#", "", 1)))).value
 		channel_members = (yield self.call(Event.create('get_users_of_room', channel_info["_id"]))).value
-		self.join_room(channel_info["_id"])
-		self.sub_to_room_messages(channel_info["_id"])
-		users = " ".join(member["username"] for member in channel_members["records"])
+		for member in channel_members["records"]:
+			user = self.get_fake_user(member['username'])
+			self.user.irc.channels[name].users.append(user)
+		yield self.call(Event.create('join_room', channel_info["_id"]))
+		yield self.call(Event.create('sub_to_room_messages', channel_info["_id"]))
 		self.user.irc.join(self.user.sock, source, name)
 
 	@handler('part')

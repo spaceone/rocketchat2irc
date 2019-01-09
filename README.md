@@ -1,12 +1,16 @@
 # rocketchat2irc
-A IRC server which forwards all messages between rocket-chat
+A IRC server which forwards all messages between rocket-chat and your IRC client.
+
+See also: https://github.com/RocketChat/Rocket.Chat/issues/1685
+
+This is far away from being feature complete. Pull requests are very welcome.
 
 ## Install
 
-git clone https://github.com/circuits/circuits
-git clone https://github.com/spaceone/rocketchat2irc
-cd rocketchat2irc
-ln -s ../circuits/circuits
+* git clone https://github.com/circuits/circuits
+* git clone https://github.com/spaceone/rocketchat2irc
+* cd rocketchat2irc
+* ln -s ../circuits/circuits
 
 ## Usage
 

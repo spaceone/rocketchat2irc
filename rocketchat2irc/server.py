@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from resource import setrlimit, RLIMIT_CPU
 from argparse import ArgumentParser
 from collections import defaultdict
 from itertools import chain
@@ -8,33 +9,35 @@ from time import time
 from logging import getLogger
 from urlparse import urlparse
 
-from circuits import BaseComponent, handler, Debugger
+from circuits import BaseComponent, handler, Debugger, Event
+from circuits.io import stdin
 from circuits.net.events import close, write
 from circuits.net.sockets import TCPServer
 from circuits.protocols.irc import IRC, Message, joinprefix, reply, response
 from circuits.protocols.irc.replies import (
 	ERR_NICKNAMEINUSE, ERR_NOMOTD, ERR_NOSUCHCHANNEL, ERR_NOSUCHNICK,
 	ERR_UNKNOWNCOMMAND, RPL_ENDOFNAMES, RPL_ENDOFWHO, RPL_NAMEREPLY,
-	RPL_NOTOPIC, RPL_WELCOME, RPL_WHOREPLY, RPL_YOURHOST,
+	RPL_NOTOPIC, RPL_TOPIC, RPL_WELCOME, RPL_WHOREPLY, RPL_YOURHOST,
 	RPL_LIST, RPL_LISTEND, _M
 )
 
-from rocketchat2irc.rocketchat import RocketChatClient
-
 __version__ = "0.0.1"
+setrlimit(RLIMIT_CPU, (2, 3))
 
 
 class Channel(object):
 
 	def __init__(self, name):
 		self.name = name
+		self.topic = None
 
 		self.users = []
 
 
 class User(object):
 
-	def __init__(self, sock, host, port):
+	def __init__(self, irc, sock, host, port):
+		self.irc = irc
 		self.sock = sock
 		self.host = host
 		self.port = port
@@ -46,6 +49,10 @@ class User(object):
 		self.registered = False
 		self.userinfo = UserInfo()
 		self.rc = None
+
+	@property
+	def source(self):
+		return (self.nick, self.prefix, self.userinfo.name)
 
 	@property
 	def prefix(self):
@@ -83,7 +90,9 @@ class Server(BaseComponent):
 
 		self.logger = getLogger(__name__)
 		if args.debug:
-			self += Debugger(logger=self.logger)
+			self += Debugger(channel=self.channel, IgnoreEvents=['_read', '_write', 'ping'])
+			self += stdin
+			#self += Debugger(logger=self.logger, channel=self.channel)
 
 		self.buffers = defaultdict(bytes)
 
@@ -137,7 +146,7 @@ class Server(BaseComponent):
 
 	@handler('connect')
 	def connect(self, sock, host, port):
-		self.users[sock] = User(sock, host, port)
+		self.users[sock] = User(self, sock, host, port)
 
 		self.logger.info("C: [{0:s}:{1:d}]".format(host, port))
 
@@ -220,7 +229,8 @@ class Server(BaseComponent):
 		self.fire(reply(sock, ERR_NOMOTD()))
 
 	def force_join(self, sock, source, channel):
-		self.fire(response.create("join", sock, source, channel))
+		#self.fire(response.create("join", sock, source, channel))
+		self.join(sock, source, channel)
 
 	@handler('join')
 	def join(self, sock, source, name):
@@ -242,9 +252,12 @@ class Server(BaseComponent):
 			Message("JOIN", name, prefix=user.prefix)
 		)
 
-		self.fire(reply(sock, RPL_NOTOPIC(name)))
-		self.fire(reply(sock, RPL_NAMEREPLY(channel)))
-		self.fire(reply(sock, RPL_ENDOFNAMES()))
+		if channel.topic:
+			self.fire(reply(sock, RPL_TOPIC(channel.topic)))
+		else:
+			self.fire(reply(sock, RPL_NOTOPIC(channel.name)))
+		self.fire(reply(sock, RPL_NAMEREPLY(channel.name, [x.prefix for x in channel.users])))
+		self.fire(reply(sock, RPL_ENDOFNAMES(channel.name)))
 
 	@handler('join', priority=2)
 	def on_join(self, event, sock, source, name):
@@ -252,7 +265,7 @@ class Server(BaseComponent):
 		if not user.rc:
 			return
 		event.stop()
-		user.rc.on_join(source, name)
+		user.rc.fire(Event.create('join', source, name))
 
 	@handler('part')
 	def part(self, sock, source, name, reason="Leaving"):
@@ -272,12 +285,12 @@ class Server(BaseComponent):
 			del self.channels[name]
 
 	@handler('part', priority=2)
-	def on_join(self, event, sock, source, name, reason='Leaving'):
+	def on_part(self, event, sock, source, name, reason='Leaving'):
 		user = self.users[sock]
 		if not user.rc:
 			return
 		event.stop()
-		user.rc.on_part(source, name, reason)
+		user.rc.fire(Event.create('part', source, name, reason))
 
 	@handler('privmsg')
 	def privmsg(self, sock, source, target, message):
@@ -311,7 +324,7 @@ class Server(BaseComponent):
 		if not user.rc:
 			return
 		event.stop()
-		user.rc.on_privmsg(target, message)
+		user.rc.fire(Event.create('privmsg', target, message))
 
 	@handler('privmsg', priority=2)
 	def _on_login(self, event, sock, source, target, message):
@@ -320,12 +333,11 @@ class Server(BaseComponent):
 		event.stop()
 		if not message.startswith('identify '):
 			return
-		_, username, password = message.split()
-		url = urlparse(username)
-		username = url.username
+		_, url = message.split()
+		uri = urlparse(url)
 		user = self.users[sock]
-		user.rc = RocketChatClient(url, username, password)
-		self += user.rc
+		from rocketchat2irc.rocketchat import RocketChatClient
+		user.rc = RocketChatClient(url, uri.username, uri.password, user).register(self)
 
 	@handler('who')
 	def who(self, sock, source, mask):
@@ -365,14 +377,16 @@ class Server(BaseComponent):
 		self.fire(write(target, bytes(message)))
 
 	@handler('list')
-	def list(self, sock):
+	def list(self, sock, source):
 		user = self.users[sock]
 		if not user.rc:
 			return
-		channel_list = user.rc.get_channels()
+		user.rc.fire(Event.create('list'))
+
+	def send_channel_list(self, sock, channels):
 		self.fire(reply(sock, _M(u"321", "Channel Users Name")))
-		for channel in channel_list:
-			self.fire(reply(sock, RPL_LIST(channel['name'], channel['usersCount'], channel.get('topic', ''))))
+		for channel, count, topic in channels:
+			self.fire(reply(sock, RPL_LIST(channel, count, topic or '')))
 		self.fire(reply(sock, RPL_LISTEND()))
 
 	@property
